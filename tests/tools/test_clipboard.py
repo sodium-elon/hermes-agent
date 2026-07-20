@@ -35,7 +35,10 @@ from hermes_cli.clipboard import (
     _windows_has_image,
     _convert_to_png,
 )
-from cli import _should_auto_attach_clipboard_image_on_paste
+from cli import (
+    _is_forwarded_clipaste_image_path,
+    _should_auto_attach_clipboard_image_on_paste,
+)
 
 FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 FAKE_BMP = b"BM" + b"\x00" * 100
@@ -1052,6 +1055,18 @@ class TestAutoAttachClipboardImageOnPaste:
 
     def test_allows_auto_attach_for_whitespace_only_paste(self):
         assert _should_auto_attach_clipboard_image_on_paste("   \n\t  ") is True
+
+    def test_allows_auto_attach_for_forwarded_macos_clipaste_path(self):
+        path = "/Users/john/Library/Caches/clipaste/shot-mrt5oeym.png"
+        assert _is_forwarded_clipaste_image_path(path) is True
+        assert _should_auto_attach_clipboard_image_on_paste(path) is True
+
+    def test_allows_file_uri_for_forwarded_macos_clipaste_path(self):
+        path = "file:///Users/john/Library/Caches/clipaste/shot-mrt5oeym.png"
+        assert _is_forwarded_clipaste_image_path(path) is True
+
+    def test_rejects_unrelated_macos_path(self):
+        assert _is_forwarded_clipaste_image_path("/Users/john/Desktop/notes.txt") is False
 
 
 class TestVoiceSubmission:

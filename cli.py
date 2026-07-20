@@ -2989,9 +2989,30 @@ def _format_image_attachment_badges(attached_images: list[Path], image_counter: 
     )
 
 
+def _is_forwarded_clipaste_image_path(pasted_text: str) -> bool:
+    """Return whether a paste is a macOS clipaste temporary image path.
+
+    Remote terminal setups can forward the Mac clipboard to the host running
+    Hermes while Ghostty still emits the Mac-local temporary pathname as the
+    bracketed-paste payload.  That pathname cannot exist on the remote host,
+    so it is a signal to read the forwarded clipboard instead.
+    """
+    value = str(pasted_text or "").strip().replace("\\ ", " ")
+    if value.startswith("file://"):
+        try:
+            value = unquote(urlparse(value).path or "")
+        except Exception:
+            return False
+    return bool(re.fullmatch(
+        r"/Users/[^/]+/Library/Caches/clipaste/[^/]+\.(?:png|jpe?g|webp|gif)",
+        value,
+        flags=re.IGNORECASE,
+    ))
+
+
 def _should_auto_attach_clipboard_image_on_paste(pasted_text: str) -> bool:
-    """Auto-attach clipboard images only for image-only paste gestures."""
-    return not pasted_text.strip()
+    """Auto-attach for image-only gestures or forwarded clipaste paths."""
+    return not pasted_text.strip() or _is_forwarded_clipaste_image_path(pasted_text)
 
 
 def _strip_leaked_bracketed_paste_wrappers(text: str) -> str:
@@ -14338,6 +14359,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 self._recover_terminal_input_modes(reason="mouse reports leaked into bracketed paste payload")
             if _should_auto_attach_clipboard_image_on_paste(pasted_text) and self._try_attach_clipboard_image():
                 event.app.invalidate()
+                # Ghostty's macOS clipaste integration pastes a temporary path.
+                # In a remote session the path itself is useless; the forwarded
+                # clipboard image we just attached is the real payload.
+                if _is_forwarded_clipaste_image_path(pasted_text):
+                    pasted_text = ""
             if pasted_text:
                 # Sanitize surrogate characters (e.g. from Word/Google Docs paste) before writing
                 from run_agent import _sanitize_surrogates
