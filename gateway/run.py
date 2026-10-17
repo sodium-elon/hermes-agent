@@ -9390,9 +9390,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _quick_key = self._session_key_for_source(source)
         # Track the topic a normal turn would use, even for early-return commands.
         # Keep the raw quick key for update/approval prompts and running guards.
-        _activity_key = self._session_key_for_source(
-            self._normalize_source_for_session_key(source)
+        _activity_source = await asyncio.to_thread(
+            self._normalize_source_for_session_key, source
         )
+        _activity_key = self._session_key_for_source(_activity_source)
         # Before slash-command dispatch and before this inbound can update any
         # generic activity clock. Busy turns only mark durable pending recovery.
         self._record_session_user_instruction(event, _activity_key)
