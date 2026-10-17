@@ -740,12 +740,21 @@ class SessionEntry:
     # (see sanitize_model_override / SessionStore.set_model_override).
     model_override: Optional[Dict[str, str]] = None
 
+    # Actual inbound user instructions only, independent of updated_at (which
+    # routing, transcript writes and internal events also advance).
+    last_user_instruction_at: Optional[float] = None
+    # A user gap detected during a running turn is consumed at the next safe
+    # turn boundary, including after a gateway restart.
+    model_recovery_pending: bool = False
+
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "session_key": self.session_key,
             "session_id": self.session_id,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
+            "last_user_instruction_at": self.last_user_instruction_at,
+            "model_recovery_pending": self.model_recovery_pending,
             "display_name": self.display_name,
             "platform": self.platform.value if self.platform else None,
             "chat_type": self.chat_type,
@@ -846,6 +855,8 @@ class SessionEntry:
             auto_reset_reason=data.get("auto_reset_reason"),
             reset_had_activity=data.get("reset_had_activity", False),
             model_override=sanitize_model_override(data.get("model_override")),
+            last_user_instruction_at=data.get("last_user_instruction_at"),
+            model_recovery_pending=data.get("model_recovery_pending", False),
         )
 
 
@@ -2134,6 +2145,35 @@ class SessionStore:
                     display_name=entry.display_name,
                 )
 
+    def note_user_instruction(self, session_key: str, timestamp: float) -> bool:
+        """Persist real inbound activity and report a strictly >24h user gap."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return False
+            previous = entry.last_user_instruction_at
+            # Legacy entries have no trustworthy user-only clock. Bootstrap by
+            # returning to the configured primary once, not by treating generic
+            # routing/assistant activity as a fresh user instruction.
+            stale = previous is None or timestamp - previous > 24 * 60 * 60
+            entry.model_recovery_pending = entry.model_recovery_pending or stale
+            entry.last_user_instruction_at = max(previous or timestamp, timestamp)
+            self._save()
+            return entry.model_recovery_pending
+
+    def consume_model_recovery(self, session_key: str) -> bool:
+        """Clear an expired temporary override only at a safe turn boundary."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None or not entry.model_recovery_pending:
+                return False
+            entry.model_override = None
+            entry.model_recovery_pending = False
+            self._save()
+            return True
+
     def set_model_override(
         self, session_key: str, override: Optional[Dict[str, Any]]
     ) -> None:
@@ -2151,9 +2191,13 @@ class SessionStore:
             if entry is None:
                 return
             cleaned = sanitize_model_override(override)
-            if entry.model_override == cleaned:
+            # An explicit new selection supersedes recovery queued before it.
+            recovery_superseded = bool(cleaned and entry.model_recovery_pending)
+            if entry.model_override == cleaned and not recovery_superseded:
                 return
             entry.model_override = cleaned
+            if cleaned:
+                entry.model_recovery_pending = False
             self._save()
 
     def get_model_override(self, session_key: str) -> Optional[Dict[str, str]]:

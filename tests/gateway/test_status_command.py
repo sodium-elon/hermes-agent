@@ -44,6 +44,7 @@ def _make_runner(session_entry: SessionEntry, *, platform: Platform = Platform.T
     runner._voice_mode = {}
     runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
     runner.session_store = MagicMock()
+    runner.session_store.note_user_instruction.return_value = False
     runner.session_store.get_or_create_session.return_value = session_entry
     runner.session_store.load_transcript.return_value = []
     runner.session_store.has_any_sessions.return_value = True

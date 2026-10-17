@@ -176,14 +176,12 @@ async def _drive_picker(runner, event):
     ],
     ids=["nested-dict", "flat-string"],
 )
-async def test_picker_tap_persists_by_default(tmp_path, monkeypatch, seed_model):
-    """Tapping a model in the picker (bare /model) persists to config.yaml,
-    matching the typed ``/model`` default — this is the #49176 fix. The written
-    ``model:`` must always end up a nested dict regardless of the seed shape."""
+async def test_picker_tap_explicit_global_persists(tmp_path, monkeypatch, seed_model):
+    """Explicit --global persists both flat and nested model config shapes."""
     adapter = _FakePickerAdapter()
     cfg_path = _setup_isolated_home(tmp_path, monkeypatch, seed_model)
 
-    confirmation = await _drive_picker(_make_runner(adapter), _make_event("/model"))
+    confirmation = await _drive_picker(_make_runner(adapter), _make_event("/model --global"))
 
     assert confirmation is not None
     assert "gpt-5.5" in confirmation
@@ -199,7 +197,8 @@ async def test_picker_tap_persists_by_default(tmp_path, monkeypatch, seed_model)
 
 
 @pytest.mark.asyncio
-async def test_picker_tap_session_flag_does_not_persist(tmp_path, monkeypatch):
+@pytest.mark.parametrize("args", ["", " --session"])
+async def test_picker_tap_session_only_by_default(tmp_path, monkeypatch, args):
     """``/model --session`` then a picker tap stays in-memory only — config
     untouched, but the in-memory session override must still be applied (the
     switch worked, it just wasn't persisted)."""
@@ -209,7 +208,7 @@ async def test_picker_tap_session_flag_does_not_persist(tmp_path, monkeypatch):
     )
     runner = _make_runner(adapter)
 
-    confirmation = await _drive_picker(runner, _make_event("/model --session"))
+    confirmation = await _drive_picker(runner, _make_event("/model" + args))
 
     assert confirmation is not None
     assert "gpt-5.5" in confirmation

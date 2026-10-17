@@ -1453,7 +1453,7 @@ class GatewaySlashCommandsMixin:
 
         Supports:
           /model                              — interactive picker (Telegram/Discord) or text list
-          /model <name>                       — switch model (persists by default)
+          /model <name>                       — temporary session-only switch
           /model <name> --session             — switch for this session only
           /model <name> --global              — switch and persist (explicit)
           /model <name> --provider <provider> — switch provider + model
@@ -1463,7 +1463,6 @@ class GatewaySlashCommandsMixin:
         import yaml
         from hermes_cli.model_switch import (
             switch_model as _switch_model, parse_model_flags,
-            resolve_persist_behavior,
             list_authenticated_providers,
             list_picker_providers,
         )
@@ -1485,7 +1484,10 @@ class GatewaySlashCommandsMixin:
             force_refresh,
             is_session,
         ) = parse_model_flags(raw_args)
-        persist_global = resolve_persist_behavior(is_global_flag, is_session)
+        # Gateway switches are temporary, including picker selections. Only
+        # an explicit --global may replace the configured primary; the CLI's
+        # persist_switch_by_default preference does not apply to messaging.
+        persist_global = is_global_flag and not is_session
 
         # --refresh: bust the disk cache so the picker shows live data.
         if force_refresh:
@@ -1527,6 +1529,12 @@ class GatewaySlashCommandsMixin:
         # (#30479).
         source = await asyncio.to_thread(self._normalize_source_for_session_key, source)
         session_key = self._session_key_for_source(source)
+        # /model can be the first interaction, before normal turn setup has
+        # created a routing entry. Persist its user clock and selection too.
+        session_store = getattr(self, "session_store", None)
+        if session_store is not None:
+            await asyncio.to_thread(session_store.get_or_create_session, source)
+            getattr(self, "_record_session_user_instruction")(event, session_key)
         override = self._session_model_overrides.get(session_key, {})
         if override:
             current_model = override.get("model", current_model)
@@ -1702,9 +1710,8 @@ class GatewaySlashCommandsMixin:
                         # stale cache signature to trigger a rebuild.
                         _self._evict_cached_agent(_session_key)
 
-                        # Persist to config (default) unless --session opted out,
-                        # mirroring the text /model command path above so a picked
-                        # model survives across sessions like a typed one (#49066).
+                        # Only an explicit --global picker selection changes
+                        # the configured primary, just like the typed command.
                         if persist_global:
                             try:
                                 if config_path.exists():

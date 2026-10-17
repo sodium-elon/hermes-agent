@@ -9388,6 +9388,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Otherwise control/session commands like /new or /help get silently
         # consumed as update answers instead of being dispatched normally.
         _quick_key = self._session_key_for_source(source)
+        # Track the topic a normal turn would use, even for early-return commands.
+        # Keep the raw quick key for update/approval prompts and running guards.
+        _activity_key = self._session_key_for_source(
+            self._normalize_source_for_session_key(source)
+        )
+        # Before slash-command dispatch and before this inbound can update any
+        # generic activity clock. Busy turns only mark durable pending recovery.
+        self._record_session_user_instruction(event, _activity_key)
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()
@@ -11313,6 +11321,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     await asyncio.to_thread(self._record_telegram_topic_binding, source, session_entry)
                 except Exception:
                     logger.debug("Failed to record Telegram topic binding", exc_info=True)
+        # Session/topic routing is now final and this handler owns the pending
+        # slot. Recover before rehydration, compression or cached-agent reuse.
+        self._record_session_user_instruction(event, session_key, at_turn_boundary=True)
+
         # Capture and immediately consume was_auto_reset so it does not
         # re-fire on subsequent messages — preventing the cleanup from
         # wiping model/reasoning overrides set between turns (Closes #48031).
@@ -16540,6 +16552,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             default=str,
         )
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+    def _record_session_user_instruction(
+        self, event: MessageEvent, session_key: str, *, at_turn_boundary: bool = False
+    ) -> None:
+        """Recover primary between turns, based only on durable user activity."""
+        store = getattr(self, "session_store", None)
+        if store is None or getattr(event, "internal", False):
+            return
+        stale = store.note_user_instruction(
+            session_key, event.timestamp.timestamp()
+        )
+        running = getattr(self, "_running_agents", {})
+        busy = session_key in running and not (
+            at_turn_boundary and running[session_key] is _AGENT_PENDING_SENTINEL
+        )
+        if not stale or busy:
+            return
+        self.session_store.consume_model_recovery(session_key)
+        self._session_model_overrides.pop(session_key, None)
+        for name in ("_pending_model_notes", "_last_resolved_model"):
+            getattr(self, name, {}).pop(session_key, None)
+        self._evict_cached_agent(session_key)
 
     def _rehydrate_session_model_override(self, session_key: str) -> None:
         """Lazily restore a persisted /model override after a gateway restart.
