@@ -348,6 +348,8 @@ class ModelSwitchResult:
     capabilities: Optional[ModelCapabilities] = None
     model_info: Optional[ModelInfo] = None
     is_global: bool = False
+    # True only when provider resolution owns the key, not an explicit endpoint.
+    managed_credentials: bool = False
 # ---------------------------------------------------------------------------
 # Flag parsing
 # ---------------------------------------------------------------------------
@@ -1167,6 +1169,7 @@ def switch_model(
     api_key = current_api_key
     base_url = current_base_url
     api_mode = ""
+    managed_credentials = False
 
     if provider_changed or explicit_provider:
         import os
@@ -1218,6 +1221,7 @@ def switch_model(
                 api_key = runtime.get("api_key", "")
                 base_url = runtime.get("base_url", "")
                 api_mode = runtime.get("api_mode", "")
+                managed_credentials = True
             except Exception as e:
                 return ModelSwitchResult(
                     success=False,
@@ -1242,14 +1246,28 @@ def switch_model(
             api_key = runtime.get("api_key", "")
             base_url = runtime.get("base_url", "")
             api_mode = runtime.get("api_mode", "")
-        except Exception:
-            pass
+            managed_credentials = True
+        except Exception as e:
+            # Do not turn a transient managed-auth failure into a successful
+            # switch carrying an unmarked, stale explicit credential override.
+            # Leave the caller's working route/provenance untouched for retry.
+            return ModelSwitchResult(
+                success=False,
+                target_provider=target_provider,
+                provider_label=provider_label,
+                is_global=is_global,
+                error_message=(
+                    f"Could not resolve credentials for provider "
+                    f"'{provider_label}': {e}"
+                ),
+            )
 
     # --- Direct alias override: use exact base_url from the alias if set ---
     if resolved_alias:
         _ensure_direct_aliases()
         _da = DIRECT_ALIASES.get(resolved_alias)
         if _da is not None and _da.base_url:
+            managed_credentials = False
             base_url = _da.base_url
             api_mode = ""  # clear so determine_api_mode re-detects from URL
             if not api_key:
@@ -1379,6 +1397,7 @@ def switch_model(
         capabilities=capabilities,
         model_info=model_info,
         is_global=is_global,
+        managed_credentials=managed_credentials,
     )
 
 
