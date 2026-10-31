@@ -178,6 +178,64 @@ def test_runner_rehydrates_override_after_restart(store_factory):
     assert override["api_mode"] == "responses"
 
 
+def test_rehydrated_override_uses_current_managed_credentials(store_factory, monkeypatch):
+    """A session pins its route, not the token/pool resolved after restart."""
+    store = store_factory()
+    entry = store.get_or_create_session(_make_source())
+    route = {
+        "model": "session-model",
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+    }
+    store.set_model_override(entry.session_key, route)
+    runner = _make_runner(store_factory())
+    old_pool, fresh_pool = object(), object()
+    current = {
+        **route, "api_key": "old-test-token", "credential_pool": old_pool,
+        "api_mode": "codex_responses",
+    }
+    monkeypatch.setattr(
+        "gateway.run._resolve_runtime_agent_kwargs_for_provider",
+        lambda provider: dict(current),
+    )
+    runner._rehydrate_session_model_override(entry.session_key)
+    current.update(api_key="fresh-test-token", credential_pool=fresh_pool)
+
+    model, runtime = runner._resolve_session_agent_runtime(
+        session_key=entry.session_key, user_config={"model": "global-model"},
+    )
+
+    assert runtime["api_key"] == current["api_key"]
+    assert runtime["credential_pool"] is fresh_pool
+    assert model == route["model"]
+    assert runtime["provider"] == route["provider"]
+    assert runtime["base_url"] == route["base_url"]
+    assert runtime["api_mode"] == "codex_responses"
+
+
+def test_rehydrated_override_recovers_after_initial_auth_failure(store_factory, monkeypatch):
+    store = store_factory()
+    entry = store.get_or_create_session(_make_source())
+    store.set_model_override(entry.session_key, {
+        "model": "session-model", "provider": "openai-codex",
+    })
+    runner = _make_runner(store)
+    with patch("gateway.run._resolve_runtime_agent_kwargs_for_provider", side_effect=RuntimeError("unavailable")):
+        runner._rehydrate_session_model_override(entry.session_key)
+    current = {
+        "provider": "openai-codex", "api_key": "fresh-test-token",
+        "base_url": "https://chatgpt.com/backend-api/codex", "api_mode": "codex_responses",
+        "credential_pool": object(),
+    }
+    monkeypatch.setattr("gateway.run._resolve_runtime_agent_kwargs_for_provider", lambda p: dict(current))
+
+    model, runtime = runner._resolve_session_agent_runtime(session_key=entry.session_key, user_config={})
+
+    assert model == "session-model"
+    for field in ("api_key", "credential_pool", "base_url", "api_mode"):
+        assert runtime[field] == current[field]
+
+
 def test_runner_rehydrate_keeps_live_override(store_factory):
     """An in-memory override (live gateway state) always wins over disk."""
     store = store_factory()

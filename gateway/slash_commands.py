@@ -1689,6 +1689,7 @@ class GatewaySlashCommandsMixin:
                             "api_key": result.api_key,
                             "base_url": result.base_url,
                             "api_mode": result.api_mode,
+                            "_managed_credentials": result.managed_credentials,
                         }
 
                         # Write-through the non-secret parts to the session
@@ -1950,6 +1951,7 @@ class GatewaySlashCommandsMixin:
                 "api_key": result.api_key,
                 "base_url": result.base_url,
                 "api_mode": result.api_mode,
+                "_managed_credentials": result.managed_credentials,
             }
 
             # Write-through the non-secret parts (model/provider/base_url) to

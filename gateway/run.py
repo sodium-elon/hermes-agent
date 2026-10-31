@@ -2969,7 +2969,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     _restart_command_source: Optional[SessionSource] = None
     _stop_task: Optional[asyncio.Task] = None
     _restart_task: Optional[asyncio.Task] = None
-    _session_model_overrides: Dict[str, Dict[str, str]] = {}
+    _session_model_overrides: Dict[str, Dict[str, Any]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
     _startup_restore_in_progress: bool = False
 
@@ -3153,7 +3153,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Per-session model overrides from /model command.
         # Key: session_key, Value: dict with model/provider/api_key/base_url/api_mode
-        self._session_model_overrides: Dict[str, Dict[str, str]] = {}
+        self._session_model_overrides: Dict[str, Dict[str, Any]] = {}
         # Per-session reasoning effort overrides from /reasoning.
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
@@ -3959,6 +3959,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "max_tokens": override.get("max_tokens"),
                 "credential_pool": override.get("credential_pool"),
             }
+            if override.get("_managed_credentials") and override.get("provider"):
+                # /model pins the route, not a snapshot of managed credentials.
+                # Resolve both together each turn so auth refresh/rotation and
+                # pool replacement cannot leave the session on an old token.
+                # Unmarked overrides may carry explicit keys: leave those alone.
+                current = _resolve_runtime_agent_kwargs_for_provider(override["provider"])
+                override_runtime["api_key"] = current.get("api_key")
+                override_runtime["credential_pool"] = current.get("credential_pool")
+                for field in ("base_url", "api_mode"):
+                    if override_runtime[field] is None:
+                        override_runtime[field] = current.get(field)
+                return override_model, override_runtime
             if override_runtime.get("api_key"):
                 if override_runtime.get("credential_pool") is None:
                     override_runtime["credential_pool"] = _credential_pool_for_provider(
@@ -10849,7 +10861,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if image_paths:
                 # Decide routing: native (attach pixels) vs text (vision_analyze
                 # pre-run + prepend description).  See agent/image_routing.py.
-                _img_mode = self._decide_image_input_mode(
+                _img_mode = await asyncio.to_thread(
+                    self._decide_image_input_mode,
                     source=source,
                     session_key=session_key,
                 )
@@ -11060,7 +11073,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # self.model/self.base_url), so using them here always raised
                 # AttributeError, silently caught below, meaning this feature
                 # never ran.
-                _msg_model, _msg_runtime = self._resolve_session_agent_runtime(
+                _msg_model, _msg_runtime = await asyncio.to_thread(
+                    self._resolve_session_agent_runtime,
                     source=source,
                     session_key=session_key,
                     user_config=_msg_cfg,
@@ -11581,7 +11595,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 pass
 
                 try:
-                    _hyg_model, _hyg_runtime = self._resolve_session_agent_runtime(
+                    _hyg_model, _hyg_runtime = await asyncio.to_thread(
+                        self._resolve_session_agent_runtime,
                         source=source,
                         session_key=session_key,
                         user_config=_hyg_data if isinstance(_hyg_data, dict) else None,
@@ -11687,7 +11702,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     try:
                         from run_agent import AIAgent
 
-                        _hyg_model, _hyg_runtime = self._resolve_session_agent_runtime(
+                        _hyg_model, _hyg_runtime = await asyncio.to_thread(
+                            self._resolve_session_agent_runtime,
                             source=source,
                             session_key=session_key,
                             user_config=_hyg_data if isinstance(_hyg_data, dict) else None,
@@ -13904,7 +13920,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         try:
             user_config = _load_gateway_config()
-            model, runtime_kwargs = self._resolve_session_agent_runtime(
+            model, runtime_kwargs = await asyncio.to_thread(
+                self._resolve_session_agent_runtime,
                 source=source,
                 user_config=user_config,
             )
@@ -16608,13 +16625,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "model": persisted.get("model"),
             "provider": persisted.get("provider"),
             "base_url": persisted.get("base_url"),
+            "_managed_credentials": True,
         }
         provider = persisted.get("provider")
         if provider:
             # Re-resolve credentials for the persisted provider. On failure
             # (e.g. credentials were removed since the switch) keep the
-            # credential-less override — _resolve_session_agent_runtime falls
-            # back to env-based resolution and applies model/provider on top.
+            # credential-less override — _resolve_session_agent_runtime retries
+            # the same provider on the next turn, never another provider's key.
             try:
                 runtime = _resolve_runtime_agent_kwargs_for_provider(provider)
                 override["api_key"] = runtime.get("api_key")
@@ -19119,6 +19137,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # must reach the next turn (#60955).  Per-session turn
             # serialization (_running_agents) keeps this safe post-lock.
             if reused_cached_agent and agent is not None:
+                # Pool objects are refreshed independently of token changes and
+                # deliberately do not bust the frozen prompt cache. Rebind only
+                # the active route: a fallback may still own this agent's client
+                # and must not receive the primary provider's pool.
+                runtime = turn_route["runtime"]
+                if (
+                    agent.provider == runtime.get("provider")
+                    and agent.base_url == runtime.get("base_url")
+                ):
+                    agent._credential_pool = runtime.get("credential_pool")
                 self._apply_fallback_chain_to_agent(
                     agent, self._refresh_fallback_model(),
                 )
