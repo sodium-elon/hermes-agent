@@ -1981,7 +1981,13 @@ def _model_flow_kimi(config, current_model=""):
     print()
 
     # Step 3: Model selection — show appropriate models for the endpoint
-    model_list = _PROVIDER_MODELS.get("kimi-coding" if is_coding_plan else "moonshot", [])
+    if is_coding_plan:
+        # K3 is exposed by the Coding Plan endpoint as the literal model ID
+        # ``k3``.  Keep it scoped here: legacy Moonshot keys use a different
+        # endpoint and must not be offered a model they cannot authorize.
+        model_list = list(dict.fromkeys(["k3", *_PROVIDER_MODELS.get("kimi-coding", [])]))
+    else:
+        model_list = _PROVIDER_MODELS.get("moonshot", [])
 
     if model_list:
         selected = _prompt_model_selection(

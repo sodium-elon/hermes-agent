@@ -193,8 +193,8 @@ class TestProviderModelIdsPreferred:
         ):
             _model_flow_kimi({}, current_model="")
 
-        assert captured["models"] == _PROVIDER_MODELS["kimi-coding"]
-        assert captured["models"][0] == "kimi-k2.7-code"
+        assert captured["models"][1:] == _PROVIDER_MODELS["kimi-coding"]
+        assert captured["models"][0] == "k3"
 
 
 class TestOpenRouterAndNousUnchanged:
